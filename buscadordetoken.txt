@@ -1,0 +1,898 @@
+========================================
+ ESTRUTURA DE DIRETÓRIOS (tree)
+========================================
+
+.
+├── alertados.json
+├── app_novalista.py
+├── app.py
+├── buscadordetoken.txt
+├── dashboard.py
+├── .env
+├── historico.json
+├── novos_listados.json
+├── posicoes.json
+└── templates
+    └── dashboard.html
+
+2 directories, 10 files
+
+========================================
+ CONTEÚDO DOS ARQUIVOS
+========================================
+
+
+----------------------------------------
+ FILE: ./alertados.json
+----------------------------------------
+
+----------------------------------------
+ FILE: ./novos_listados.json
+----------------------------------------
+| {
+|   "ZAMAUSDT": {
+|     "onboard": "2026-01-09T09:00:00+00:00",
+|     "detectado_em": "2026-01-09T10:53:15.194759+00:00"
+|   }
+| }
+----------------------------------------
+ FILE: ./posicoes.json
+----------------------------------------
+| {
+|   "ZAMA/USDT:USDT": {
+|     "preco_entrada": 0.142,
+|     "alvo_preco": 0.21299999999999997,
+|     "lado": "long",
+|     "ativo": true,
+|     "adicionado_em": 1767961698.8462682
+|   }
+| }
+----------------------------------------
+ FILE: ./dashboard.py
+----------------------------------------
+| # dashboard.py
+| from flask import Flask, render_template, jsonify
+| import json
+| import os
+| import logging
+| 
+| app = Flask(__name__)
+| 
+| def carregar_historico():
+|     if not os.path.exists("historico.json"):
+|         return []
+|     try:
+|         with open("historico.json", "r") as f:
+|             conteudo = f.read().strip()
+|             if not conteudo:
+|                 return []
+|             return json.loads(conteudo)
+|     except Exception as e:
+|         logging.warning(f"Erro ao carregar histórico: {e}")
+|         return []
+| 
+| @app.route("/")
+| def index():
+|     return render_template("dashboard.html")
+| 
+| @app.route("/api/stats")
+| def stats():
+|     hist = carregar_historico()
+|     if not hist:
+|         return jsonify({
+|             "total_trades": 0,
+|             "win_rate": 0,
+|             "profit_total_usdt": 0,
+|             "avg_profit_per_trade": 0,
+|             "trades": []
+|         })
+| 
+|     total_trades = len(hist)
+|     wins = [t for t in hist if t["lucro_pct"] > 0]
+|     win_rate = len(wins) / total_trades * 100 if total_trades else 0
+|     profit_total = sum(t["lucro_usdt"] for t in hist)
+|     avg_profit = profit_total / total_trades if total_trades else 0
+| 
+|     return jsonify({
+|         "total_trades": total_trades,
+|         "win_rate": round(win_rate, 1),
+|         "profit_total_usdt": round(profit_total, 2),
+|         "avg_profit_per_trade": round(avg_profit, 2),
+|         "trades": hist
+|     })
+| 
+| if __name__ == "__main__":
+|     app.run(host="0.0.0.0", port=5001, debug=True)
+----------------------------------------
+ FILE: ./app_novalista.py
+----------------------------------------
+| #!/usr/bin/env python3
+| # app_novalista.py – Monitor de novos listings no USD-M Futures da Binance (versão robusta)
+| 
+| import os
+| import time
+| import json
+| import logging
+| import socket
+| import requests
+| from datetime import datetime, timezone
+| from urllib3.util.retry import Retry
+| from requests.adapters import HTTPAdapter
+| from dotenv import load_dotenv
+| 
+| # ================= CONFIG =================
+| CHECK_INTERVAL = 120          # segundos
+| MAX_HORAS_LISTAGEM = 16       # janela de novidade
+| CACHE_FILE = "novos_listados.json"
+| REQUEST_TIMEOUT = 30          # aumentado
+| MAX_RETRIES = 3
+| # =========================================
+| 
+| logging.basicConfig(
+|     level=logging.INFO,
+|     format="%(asctime)s - %(levelname)s - %(message)s"
+| )
+| 
+| load_dotenv()
+| 
+| TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+| TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+| 
+| if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+|     raise RuntimeError("Telegram não configurado no .env")
+| 
+| 
+| # ================= UTIL =================
+| 
+| def internet_disponivel(host="8.8.8.8", port=53, timeout=5):
+|     """Verifica se há conexão básica com a internet."""
+|     try:
+|         socket.setdefaulttimeout(timeout)
+|         with socket.create_connection((host, port), timeout=timeout):
+|             return True
+|     except OSError:
+|         return False
+| 
+| 
+| def criar_sessao_http():
+|     """Cria uma sessão HTTP com retry automático."""
+|     sessao = requests.Session()
+|     retry_strategy = Retry(
+|         total=MAX_RETRIES,
+|         backoff_factor=2,  # 2s, 4s, 8s...
+|         status_forcelist=[429, 500, 502, 503, 504],
+|     )
+|     adapter = HTTPAdapter(max_retries=retry_strategy)
+|     sessao.mount("http://", adapter)
+|     sessao.mount("https://", adapter)
+|     return sessao
+| 
+| 
+| def enviar_telegram(msg):
+|     # 🔥 CORRIGIDO: removido espaço após "bot"
+|     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+|     payload = {
+|         "chat_id": TELEGRAM_CHAT_ID,
+|         "text": msg,
+|         "parse_mode": "HTML"
+|     }
+|     try:
+|         sessao = criar_sessao_http()
+|         sessao.post(url, data=payload, timeout=20)
+|     except Exception as e:
+|         logging.error(f"Erro ao enviar Telegram: {e}")
+| 
+| 
+| def carregar_cache():
+|     if not os.path.exists(CACHE_FILE):
+|         return {}
+|     try:
+|         with open(CACHE_FILE, "r") as f:
+|             conteudo = f.read().strip()
+|             if not conteudo:
+|                 return {}
+|             return json.loads(conteudo)
+|     except Exception as e:
+|         logging.warning(f"Erro ao carregar cache: {e}")
+|         return {}
+| 
+| 
+| def salvar_cache(data):
+|     try:
+|         with open(CACHE_FILE, "w") as f:
+|             json.dump(data, f, indent=2)
+|     except Exception as e:
+|         logging.error(f"Erro ao salvar cache: {e}")
+| 
+| 
+| # ================= BINANCE =================
+| 
+| def buscar_exchange_info():
+|     # 🔥 CORRIGIDO: URL SEM ESPAÇOS
+|     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+|     sessao = criar_sessao_http()
+|     r = sessao.get(url, timeout=REQUEST_TIMEOUT)
+|     r.raise_for_status()
+|     return r.json()
+| 
+| 
+| def filtrar_novos_listings(exchange_info, horas_max):
+|     agora = datetime.now(timezone.utc)
+|     novos = []
+| 
+|     for symbol in exchange_info.get("symbols", []):
+|         if symbol.get("contractType") != "PERPETUAL":
+|             continue
+|         if symbol.get("quoteAsset") != "USDT":
+|             continue
+| 
+|         onboard_ms = symbol.get("onboardDate")
+|         if not onboard_ms:
+|             continue
+| 
+|         onboard_dt = datetime.fromtimestamp(onboard_ms / 1000, tz=timezone.utc)
+|         diff_horas = (agora - onboard_dt).total_seconds() / 3600
+| 
+|         if 0 <= diff_horas <= horas_max:
+|             novos.append({
+|                 "symbol": symbol["symbol"],
+|                 "onboard": onboard_dt.isoformat(),
+|                 "idade_horas": round(diff_horas, 2)
+|             })
+| 
+|     return novos
+| 
+| 
+| # ================= LOOP =================
+| 
+| def main():
+|     logging.info("Monitor de novos listings USD-M iniciado")
+| 
+|     while True:
+|         try:
+|             if not internet_disponivel():
+|                 logging.warning("Sem conexão com a internet. Aguardando...")
+|                 time.sleep(60)
+|                 continue
+| 
+|             cache = carregar_cache()
+|             exchange_info = buscar_exchange_info()
+|             novos = filtrar_novos_listings(exchange_info, MAX_HORAS_LISTAGEM)
+| 
+|             for item in novos:
+|                 sym = item["symbol"]
+|                 if sym in cache:
+|                     continue
+| 
+|                 # 🔥 CORRIGIDO: link do TradingView sem espaço
+|                 tv_link = f"https://www.tradingview.com/chart/?symbol=BINANCE:{sym}.P"
+| 
+|                 msg = (
+|                     f"🆕 <b>NOVO LISTING NO FUTURES USD-M</b>\n"
+|                     f"Par: <b>{sym}</b>\n"
+|                     f"Idade: {item['idade_horas']} horas\n"
+|                     f"Onboard: {item['onboard']}\n"
+|                     f"{tv_link}"
+|                 )
+| 
+|                 enviar_telegram(msg)
+|                 logging.info(f"Novo listing detectado: {sym}")
+| 
+|                 cache[sym] = {
+|                     "onboard": item["onboard"],
+|                     "detectado_em": datetime.now(timezone.utc).isoformat()
+|                 }
+| 
+|             if novos:
+|                 salvar_cache(cache)
+| 
+|             time.sleep(CHECK_INTERVAL)
+| 
+|         except KeyboardInterrupt:
+|             logging.info("Encerrado pelo usuário")
+|             break
+|         except requests.exceptions.Timeout:
+|             logging.error("Timeout na requisição à Binance. Tentando novamente...")
+|             time.sleep(30)
+|         except requests.exceptions.ConnectionError as e:
+|             logging.error(f"Erro de conexão: {e}. Verifique rede ou bloqueio.")
+|             time.sleep(60)
+|         except Exception as e:
+|             logging.error(f"Erro inesperado no loop: {e}")
+|             time.sleep(30)
+| 
+| 
+| if __name__ == "__main__":
+|     main()
+----------------------------------------
+ FILE: ./.env
+----------------------------------------
+| BINANCE_API_KEY=PhlCuAhZ6GWID89hv17b1D5aph8FuDFtcX3fIvrFFaLuiusaD40JXnxE0qtYW7Jd
+| BINANCE_SECRET_KEY=sibRTHDsEN4AWUcfUcUM7e9xkxKaicdH9AXDUXCqxjOTHqsY9TkPaTCYTbTCXaaA
+| 
+| TELEGRAM_BOT_TOKEN=8279800593:AAGKkiSo_-gv22axOF_x0oaD6aX11aHDyeI
+| TELEGRAM_CHAT_ID=787153281
+| 
+| GOOGLE_API_KEY=AIzaSyAjKdh8hxRov5_FsAyOLwrcLs9GZfIwPUQ
+
+----------------------------------------
+ FILE: ./app.py
+----------------------------------------
+| #!/usr/bin/env python3
+| # app.py – Scanner de tokens novos em futures + monitor de lucro + registro de trades
+| 
+| import os
+| import json
+| import time
+| import logging
+| import requests
+| import ccxt
+| from dotenv import load_dotenv
+| 
+| # ================== CONFIG ==================
+| TIMEFRAME_NOVO = "15m"
+| MAX_CANDLES_NOVO = 64
+| TIMEFRAME_MOMENTUM = "1h"
+| 
+| MIN_VOLUME_USDT = 50_000
+| MIN_PRECO_PUMP = 1.50
+| MIN_MOMENTUM_1H_PCT = 5.0
+| 
+| ALVO_LUCRO_PCT = 50.0
+| CHECK_INTERVAL = 60
+| 
+| POSICOES_FILE = "posicoes.json"
+| ALERTADOS_FILE = "alertados.json"
+| HISTORICO_FILE = "historico.json"
+| # ===========================================
+| 
+| logging.basicConfig(
+|     level=logging.INFO,
+|     format="%(asctime)s - %(levelname)s - %(message)s"
+| )
+| 
+| load_dotenv()
+| 
+| BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+| BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
+| TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+| TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+| 
+| if not all([BINANCE_API_KEY, BINANCE_SECRET_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+|     raise RuntimeError("Variáveis obrigatórias não encontradas no .env")
+| 
+| 
+| # ================== UTILS ==================
+| 
+| def enviar_telegram(mensagem):
+|     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+|     payload = {
+|         "chat_id": TELEGRAM_CHAT_ID,
+|         "text": mensagem,
+|         "parse_mode": "HTML"
+|     }
+|     try:
+|         requests.post(url, data=payload, timeout=10)
+|     except Exception as e:
+|         logging.error(f"Erro ao enviar Telegram: {e}")
+| 
+| 
+| def carregar_json(path):
+|     if not os.path.exists(path):
+|         return {}
+|     try:
+|         with open(path, "r") as f:
+|             conteudo = f.read().strip()
+|             if not conteudo:
+|                 return {}
+|             return json.loads(conteudo)
+|     except Exception as e:
+|         logging.warning(f"Erro ao carregar {path}: {e}")
+|         return {}
+| 
+| 
+| def salvar_json(path, data):
+|     try:
+|         with open(path, "w") as f:
+|             json.dump(data, f, indent=2)
+|     except Exception as e:
+|         logging.error(f"Erro ao salvar {path}: {e}")
+| 
+| 
+| def carregar_historico():
+|     if not os.path.exists(HISTORICO_FILE):
+|         return []
+|     try:
+|         with open(HISTORICO_FILE, "r") as f:
+|             conteudo = f.read().strip()
+|             if not conteudo:
+|                 return []
+|             return json.loads(conteudo)
+|     except Exception as e:
+|         logging.warning(f"Erro ao carregar histórico: {e}")
+|         return []
+| 
+| 
+| def salvar_historico(historico):
+|     try:
+|         with open(HISTORICO_FILE, "w") as f:
+|             json.dump(historico, f, indent=2)
+|     except Exception as e:
+|         logging.error(f"Erro ao salvar histórico: {e}")
+| 
+| 
+| def registrar_trade_no_historico(par, info, preco_saida, motivo="take_profit"):
+|     historico = carregar_historico()
+| 
+|     # Calcula lucro percentual
+|     lucro_pct = ((preco_saida - info["preco_entrada"]) / info["preco_entrada"]) * 100
+|     # Quantidade pode vir da posição; fallback para 1 se não tiver
+|     quantidade = info.get("quantidade", 1)
+|     lucro_usdt = (lucro_pct / 100) * (info["preco_entrada"] * quantidade)
+| 
+|     trade = {
+|         "id": f"{par.replace('/', '-')}-{int(info['adicionado_em'])}",
+|         "par": par,
+|         "lado": info.get("lado", "long"),
+|         "entrada_preco": info["preco_entrada"],
+|         "saida_preco": preco_saida,
+|         "quantidade": quantidade,
+|         "entrada_ts": int(info["adicionado_em"]),
+|         "saida_ts": int(time.time()),
+|         "duracao_seg": int(time.time() - info["adicionado_em"]),
+|         "lucro_usdt": round(lucro_usdt, 4),
+|         "lucro_pct": round(lucro_pct, 2),
+|         "alvo_atingido": motivo == "take_profit",
+|         "motivo_saida": motivo
+|     }
+| 
+|     historico.append(trade)
+|     salvar_historico(historico)
+|     logging.info(f"Trade registrado: {par} | +{lucro_pct:.2f}%")
+| 
+|     # Opcional: avisar no Telegram
+|     msg = (
+|         f"✅ <b>Trade Fechado</b>\n"
+|         f"Par: {par}\n"
+|         f"Lucro: {'+' if lucro_pct > 0 else ''}{lucro_pct:.2f}% (${lucro_usdt:.2f})\n"
+|         f"Motivo: {motivo}"
+|     )
+|     enviar_telegram(msg)
+| 
+| 
+| # ================== EXCHANGE ==================
+| 
+| def criar_exchange():
+|     exchange = ccxt.binance({
+|         "apiKey": BINANCE_API_KEY,
+|         "secret": BINANCE_SECRET_KEY,
+|         "options": {"defaultType": "future"},
+|         "enableRateLimit": True,
+|     })
+|     exchange.load_markets()
+|     return exchange
+| 
+| 
+| def obter_pares_futures_usdt(exchange):
+|     return [
+|         symbol for symbol, market in exchange.markets.items()
+|         if market.get("quote") == "USDT"
+|         and market.get("type") == "future"
+|         and market.get("linear") is True
+|         and market.get("active") is True
+|     ]
+| 
+| 
+| # ================== DADOS DE MERCADO ==================
+| 
+| def get_candle_count(exchange, par, timeframe, limit):
+|     try:
+|         candles = exchange.fetch_ohlcv(par, timeframe, limit=limit)
+|         return len(candles)
+|     except:
+|         return 0
+| 
+| 
+| def get_ticker(exchange, par):
+|     try:
+|         return exchange.fetch_ticker(par)
+|     except:
+|         return None
+| 
+| 
+| def get_momentum_1h(exchange, par):
+|     try:
+|         candles = exchange.fetch_ohlcv(par, TIMEFRAME_MOMENTUM, limit=2)
+|         if len(candles) < 2:
+|             return 0.0
+|         prev = candles[-2][4]
+|         curr = candles[-1][4]
+|         return ((curr - prev) / prev) * 100
+|     except:
+|         return 0.0
+| 
+| 
+| # ================== POSIÇÕES REAIS DA BINANCE ==================
+| 
+| def obter_posicoes_abertas_binance(exchange):
+|     try:
+|         positions = exchange.fetch_positions()
+|         abertas = {}
+|         for pos in positions:
+|             contracts = float(pos.get("contracts", 0))
+|             if contracts != 0:
+|                 symbol = pos["symbol"]
+|                 entry_price = float(pos.get("entryPrice", 0))
+|                 side = pos.get("side", "long")
+|                 abertas[symbol] = {
+|                     "preco_entrada": entry_price,
+|                     "lado": side,
+|                     "quantidade": contracts,
+|                     "ativo": True
+|                 }
+|         return abertas
+|     except Exception as e:
+|         logging.error(f"Erro ao buscar posições abertas: {e}")
+|         return {}
+| 
+| 
+| # ================== LÓGICA PRINCIPAL ==================
+| 
+| def eh_token_novo(exchange, par):
+|     count = get_candle_count(exchange, par, TIMEFRAME_NOVO, MAX_CANDLES_NOVO + 5)
+|     return 0 < count <= MAX_CANDLES_NOVO
+| 
+| 
+| def detectar_pumps(exchange, pares, alertados):
+|     encontrados = []
+| 
+|     for par in pares:
+|         if par in alertados:
+|             continue
+| 
+|         if not eh_token_novo(exchange, par):
+|             continue
+| 
+|         ticker = get_ticker(exchange, par)
+|         if not ticker:
+|             continue
+| 
+|         preco = float(ticker.get("last") or 0)
+|         volume = float(ticker.get("quoteVolume") or 0)
+| 
+|         if preco < MIN_PRECO_PUMP:
+|             continue
+| 
+|         if volume < MIN_VOLUME_USDT:
+|             continue
+| 
+|         momentum = get_momentum_1h(exchange, par)
+|         if momentum < MIN_MOMENTUM_1H_PCT:
+|             continue
+| 
+|         base = par.replace("/", "")
+|         link = f"https://www.tradingview.com/chart/?symbol=BINANCE:{base}.P"
+| 
+|         encontrados.append({
+|             "par": par,
+|             "preco": preco,
+|             "volume": volume,
+|             "momentum": momentum,
+|             "link": link
+|         })
+| 
+|     return encontrados
+| 
+| 
+| def monitorar_posicoes(exchange):
+|     posicoes_local = carregar_json(POSICOES_FILE)
+|     alterado = False
+| 
+|     posicoes_binance = obter_posicoes_abertas_binance(exchange)
+| 
+|     # Detectar novas posições
+|     for par, info_binance in posicoes_binance.items():
+|         if par not in posicoes_local:
+|             preco_entrada = info_binance["preco_entrada"]
+|             alvo_preco = preco_entrada * (1 + ALVO_LUCRO_PCT / 100)
+| 
+|             posicoes_local[par] = {
+|                 "preco_entrada": preco_entrada,
+|                 "alvo_preco": alvo_preco,
+|                 "lado": info_binance["lado"],
+|                 "quantidade": info_binance["quantidade"],
+|                 "ativo": True,
+|                 "adicionado_em": time.time()
+|             }
+|             alterado = True
+|             logging.info(f"Nova posição detectada: {par} @ ${preco_entrada:.4f}")
+| 
+|     # Monitorar fechamentos e alvos
+|     for par, info in list(posicoes_local.items()):
+|         if not info.get("ativo", False):
+|             continue
+| 
+|         if par not in posicoes_binance:
+|             # Fechada manualmente ou por stop loss
+|             ticker = get_ticker(exchange, par)
+|             if ticker:
+|                 preco_saida = float(ticker["last"])
+|                 registrar_trade_no_historico(par, info, preco_saida, motivo="manual_or_sl")
+|             posicoes_local[par]["ativo"] = False
+|             alterado = True
+|             continue
+| 
+|         # Verificar alvo
+|         ticker = get_ticker(exchange, par)
+|         if not ticker:
+|             continue
+| 
+|         preco_atual = float(ticker.get("last") or 0)
+|         alvo = info.get("alvo_preco", 0)
+| 
+|         if preco_atual >= alvo and alvo > 0:
+|             registrar_trade_no_historico(par, info, preco_atual, motivo="take_profit")
+|             posicoes_local[par]["ativo"] = False
+|             alterado = True
+| 
+|     if alterado:
+|         salvar_json(POSICOES_FILE, posicoes_local)
+| 
+| 
+| # ================== LOOP ==================
+| 
+| def main():
+|     exchange = criar_exchange()
+|     pares = obter_pares_futures_usdt(exchange)
+| 
+|     logging.info("Sistema iniciado – scanner + monitor de posições + registro de trades")
+| 
+|     while True:
+|         try:
+|             alertados = carregar_json(ALERTADOS_FILE)
+|             monitorar_posicoes(exchange)
+|             pumps = detectar_pumps(exchange, pares, alertados)
+| 
+|             for p in pumps:
+|                 msg = (
+|                     f"🔥 <b>PUMP EM TOKEN NOVO</b>\n"
+|                     f"Par: <b>{p['par']}</b>\n"
+|                     f"Preço: ${p['preco']:.4f}\n"
+|                     f"Volume: ${p['volume']:,.0f}\n"
+|                     f"Momentum 1h: +{p['momentum']:.1f}%\n"
+|                     f"Gráfico: {p['link']}"
+|                 )
+|                 enviar_telegram(msg)
+|                 logging.info(f"Alerta enviado para {p['par']}")
+| 
+|                 alertados[p["par"]] = {"detectado_em": time.time()}
+| 
+|             if pumps:
+|                 salvar_json(ALERTADOS_FILE, alertados)
+| 
+|             time.sleep(CHECK_INTERVAL)
+| 
+|         except KeyboardInterrupt:
+|             logging.info("Encerrado pelo usuário")
+|             break
+|         except Exception as e:
+|             logging.error(f"Erro no loop: {e}")
+|             time.sleep(30)
+| 
+| 
+| if __name__ == "__main__":
+|     main()
+----------------------------------------
+ FILE: ./templates/dashboard.html
+----------------------------------------
+| <!-- templates/dashboard.html -->
+| <!DOCTYPE html>
+| <html>
+| 
+| <head>
+|     <title>📊 Dashboard de Trading</title>
+|     <meta charset="utf-8">
+|     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+|     <style>
+|         body {
+|             font-family: 'Segoe UI', Arial;
+|             margin: 20px;
+|             background: #f9f9f9;
+|         }
+| 
+|         .container {
+|             max-width: 1200px;
+|             margin: auto;
+|         }
+| 
+|         h1 {
+|             text-align: center;
+|             color: #2c3e50;
+|         }
+| 
+|         .stats {
+|             display: flex;
+|             flex-wrap: wrap;
+|             gap: 20px;
+|             margin: 20px 0;
+|         }
+| 
+|         .stat-box {
+|             background: white;
+|             padding: 15px;
+|             border-radius: 8px;
+|             box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+|             min-width: 180px;
+|             text-align: center;
+|         }
+| 
+|         .stat-value {
+|             font-size: 24px;
+|             font-weight: bold;
+|             color: #27ae60;
+|         }
+| 
+|         table {
+|             width: 100%;
+|             border-collapse: collapse;
+|             margin-top: 20px;
+|             background: white;
+|             box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+|         }
+| 
+|         th,
+|         td {
+|             padding: 10px;
+|             text-align: left;
+|             border-bottom: 1px solid #eee;
+|         }
+| 
+|         th {
+|             background-color: #f2f2f2;
+|         }
+| 
+|         .profit {
+|             color: green;
+|         }
+| 
+|         .loss {
+|             color: red;
+|         }
+| 
+|         canvas {
+|             margin: 20px 0;
+|             background: white;
+|             padding: 15px;
+|             border-radius: 8px;
+|             box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+|         }
+|     </style>
+| </head>
+| 
+| <body>
+|     <div class="container">
+|         <h1>📈 Dashboard de Performance</h1>
+| 
+|         <div class="stats">
+|             <div class="stat-box">
+|                 <div>Total de Trades</div>
+|                 <div class="stat-value" id="total-trades">0</div>
+|             </div>
+|             <div class="stat-box">
+|                 <div>Win Rate</div>
+|                 <div class="stat-value" id="win-rate">0%</div>
+|             </div>
+|             <div class="stat-box">
+|                 <div>Lucro Total (USDT)</div>
+|                 <div class="stat-value" id="profit-total">$0.00</div>
+|             </div>
+|             <div class="stat-box">
+|                 <div>Média por Trade</div>
+|                 <div class="stat-value" id="avg-profit">$0.00</div>
+|             </div>
+|         </div>
+| 
+|         <canvas id="profitChart" height="100"></canvas>
+|         <canvas id="pnlChart" height="100"></canvas>
+| 
+|         <table>
+|             <thead>
+|                 <tr>
+|                     <th>Par</th>
+|                     <th>Lado</th>
+|                     <th>Entrada</th>
+|                     <th>Saída</th>
+|                     <th>%</th>
+|                     <th>USDT</th>
+|                     <th>Duração</th>
+|                 </tr>
+|             </thead>
+|             <tbody id="trades-body"></tbody>
+|         </table>
+|     </div>
+| 
+|     <script>
+|         let trades = [];
+| 
+|         async function loadStats() {
+|             const res = await fetch('/api/stats');
+|             const data = await res.json();
+| 
+|             document.getElementById('total-trades').textContent = data.total_trades;
+|             document.getElementById('win-rate').textContent = data.win_rate + '%';
+|             document.getElementById('profit-total').textContent = '$' + data.profit_total_usdt.toFixed(2);
+|             document.getElementById('avg-profit').textContent = '$' + data.avg_profit_per_trade.toFixed(2);
+| 
+|             trades = data.trades;
+| 
+|             // Renderizar tabela
+|             const tbody = document.getElementById('trades-body');
+|             tbody.innerHTML = '';
+|             trades.forEach(t => {
+|                 const row = document.createElement('tr');
+|                 const pctClass = t.lucro_pct > 0 ? 'profit' : 'loss';
+|                 row.innerHTML = `
+|           <td>${t.par}</td>
+|           <td>${t.lado}</td>
+|           <td>$${t.entrada_preco.toFixed(4)}</td>
+|           <td>$${t.saida_preco.toFixed(4)}</td>
+|           <td class="${pctClass}">${t.lucro_pct > 0 ? '+' : ''}${t.lucro_pct}%</td>
+|           <td>$${t.lucro_usdt.toFixed(2)}</td>
+|           <td>${Math.floor(t.duracao_seg / 60)}m</td>
+|         `;
+|                 tbody.appendChild(row);
+|             });
+| 
+|             renderCharts();
+|         }
+| 
+|         function renderCharts() {
+|             // Gráfico de P&L acumulado
+|             const ctx1 = document.getElementById('profitChart').getContext('2d');
+|             const cumulative = [];
+|             let sum = 0;
+|             trades.forEach(t => {
+|                 sum += t.lucro_usdt;
+|                 cumulative.push(sum);
+|             });
+| 
+|             new Chart(ctx1, {
+|                 type: 'line',
+|                 data: {
+|                     labels: trades.map((_, i) => `Trade ${i + 1}`),
+|                     datasets: [{
+|                         label: 'Lucro Acumulado (USDT)',
+|                         data: cumulative,
+|                         borderColor: '#27ae60',
+|                         backgroundColor: 'rgba(39, 174, 96, 0.1)',
+|                         fill: true
+|                     }]
+|                 },
+|                 options: { responsive: true, plugins: { title: { display: true, text: 'Lucro Acumulado' } } }
+|             });
+| 
+|             // Gráfico de ganhos/perdas por trade
+|             const ctx2 = document.getElementById('pnlChart').getContext('2d');
+|             new Chart(ctx2, {
+|                 type: 'bar',
+|                 data: {
+|                     labels: trades.map((_, i) => `T${i + 1}`),
+|                     datasets: [{
+|                         label: 'P&L por Trade (USDT)',
+|                         data: trades.map(t => t.lucro_usdt),
+|                         backgroundColor: trades.map(t => t.lucro_usdt >= 0 ? '#27ae60' : '#e74c3c')
+|                     }]
+|                 },
+|                 options: { responsive: true, plugins: { title: { display: true, text: 'P&L por Trade' } } }
+|             });
+|         }
+| 
+|         loadStats();
+|     </script>
+| </body>
+| 
+| </html>
+----------------------------------------
+ FILE: ./historico.json
+----------------------------------------
+| []

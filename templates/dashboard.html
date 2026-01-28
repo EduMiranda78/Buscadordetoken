@@ -1,0 +1,207 @@
+<!-- templates/dashboard.html -->
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>📊 Dashboard de Trading</title>
+    <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial;
+            margin: 20px;
+            background: #f9f9f9;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+
+        .stats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .stat-box {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            min-width: 180px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #27ae60;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            background: white;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        th,
+        td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        .profit {
+            color: green;
+        }
+
+        .loss {
+            color: red;
+        }
+
+        canvas {
+            margin: 20px 0;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>📈 Dashboard de Performance</h1>
+
+        <div class="stats">
+            <div class="stat-box">
+                <div>Total de Trades</div>
+                <div class="stat-value" id="total-trades">0</div>
+            </div>
+            <div class="stat-box">
+                <div>Win Rate</div>
+                <div class="stat-value" id="win-rate">0%</div>
+            </div>
+            <div class="stat-box">
+                <div>Lucro Total (USDT)</div>
+                <div class="stat-value" id="profit-total">$0.00</div>
+            </div>
+            <div class="stat-box">
+                <div>Média por Trade</div>
+                <div class="stat-value" id="avg-profit">$0.00</div>
+            </div>
+        </div>
+
+        <canvas id="profitChart" height="100"></canvas>
+        <canvas id="pnlChart" height="100"></canvas>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Par</th>
+                    <th>Lado</th>
+                    <th>Entrada</th>
+                    <th>Saída</th>
+                    <th>%</th>
+                    <th>USDT</th>
+                    <th>Duração</th>
+                </tr>
+            </thead>
+            <tbody id="trades-body"></tbody>
+        </table>
+    </div>
+
+    <script>
+        let trades = [];
+
+        async function loadStats() {
+            const res = await fetch('/api/stats');
+            const data = await res.json();
+
+            document.getElementById('total-trades').textContent = data.total_trades;
+            document.getElementById('win-rate').textContent = data.win_rate + '%';
+            document.getElementById('profit-total').textContent = '$' + data.profit_total_usdt.toFixed(2);
+            document.getElementById('avg-profit').textContent = '$' + data.avg_profit_per_trade.toFixed(2);
+
+            trades = data.trades;
+
+            // Renderizar tabela
+            const tbody = document.getElementById('trades-body');
+            tbody.innerHTML = '';
+            trades.forEach(t => {
+                const row = document.createElement('tr');
+                const pctClass = t.lucro_pct > 0 ? 'profit' : 'loss';
+                row.innerHTML = `
+          <td>${t.par}</td>
+          <td>${t.lado}</td>
+          <td>$${t.entrada_preco.toFixed(4)}</td>
+          <td>$${t.saida_preco.toFixed(4)}</td>
+          <td class="${pctClass}">${t.lucro_pct > 0 ? '+' : ''}${t.lucro_pct}%</td>
+          <td>$${t.lucro_usdt.toFixed(2)}</td>
+          <td>${Math.floor(t.duracao_seg / 60)}m</td>
+        `;
+                tbody.appendChild(row);
+            });
+
+            renderCharts();
+        }
+
+        function renderCharts() {
+            // Gráfico de P&L acumulado
+            const ctx1 = document.getElementById('profitChart').getContext('2d');
+            const cumulative = [];
+            let sum = 0;
+            trades.forEach(t => {
+                sum += t.lucro_usdt;
+                cumulative.push(sum);
+            });
+
+            new Chart(ctx1, {
+                type: 'line',
+                data: {
+                    labels: trades.map((_, i) => `Trade ${i + 1}`),
+                    datasets: [{
+                        label: 'Lucro Acumulado (USDT)',
+                        data: cumulative,
+                        borderColor: '#27ae60',
+                        backgroundColor: 'rgba(39, 174, 96, 0.1)',
+                        fill: true
+                    }]
+                },
+                options: { responsive: true, plugins: { title: { display: true, text: 'Lucro Acumulado' } } }
+            });
+
+            // Gráfico de ganhos/perdas por trade
+            const ctx2 = document.getElementById('pnlChart').getContext('2d');
+            new Chart(ctx2, {
+                type: 'bar',
+                data: {
+                    labels: trades.map((_, i) => `T${i + 1}`),
+                    datasets: [{
+                        label: 'P&L por Trade (USDT)',
+                        data: trades.map(t => t.lucro_usdt),
+                        backgroundColor: trades.map(t => t.lucro_usdt >= 0 ? '#27ae60' : '#e74c3c')
+                    }]
+                },
+                options: { responsive: true, plugins: { title: { display: true, text: 'P&L por Trade' } } }
+            });
+        }
+
+        loadStats();
+    </script>
+</body>
+
+</html>

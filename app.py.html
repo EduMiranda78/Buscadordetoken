@@ -1,0 +1,373 @@
+<html><head>
+<title>app.py</title>
+<meta name="Generator" content="htmlizer/[Twisted, version 24.3.0]" />
+<link rel="alternate" href="app.py" type="text/x-python" />
+
+</head>
+<body>
+<pre><span class="py-src-comment">#!/usr/bin/env python3</span>
+<span class="py-src-comment"># app.py – Scanner de tokens novos em futures + monitor de lucro + registro de trades</span>
+
+<span class="py-src-variable">import</span> <span class="py-src-variable">os</span>
+<span class="py-src-variable">import</span> <span class="py-src-variable">json</span>
+<span class="py-src-variable">import</span> <span class="py-src-variable">time</span>
+<span class="py-src-variable">import</span> <span class="py-src-variable">logging</span>
+<span class="py-src-variable">import</span> <span class="py-src-variable">requests</span>
+<span class="py-src-variable">import</span> <span class="py-src-variable">ccxt</span>
+<span class="py-src-variable">from</span> <span class="py-src-variable">dotenv</span> <span class="py-src-variable">import</span> <span class="py-src-variable">load_dotenv</span>
+
+<span class="py-src-comment"># ================== CONFIG ==================</span>
+<span class="py-src-variable">TIMEFRAME_NOVO</span> = <span class="py-src-string">&quot;15m&quot;</span>
+<span class="py-src-variable">MAX_CANDLES_NOVO</span> = <span class="py-src-number">64</span>
+<span class="py-src-variable">TIMEFRAME_MOMENTUM</span> = <span class="py-src-string">&quot;1h&quot;</span>
+
+<span class="py-src-variable">MIN_VOLUME_USDT</span> = <span class="py-src-number">50_000</span>
+<span class="py-src-variable">MIN_PRECO_PUMP</span> = <span class="py-src-number">1.50</span>
+<span class="py-src-variable">MIN_MOMENTUM_1H_PCT</span> = <span class="py-src-number">5.0</span>
+
+<span class="py-src-variable">ALVO_LUCRO_PCT</span> = <span class="py-src-number">50.0</span>
+<span class="py-src-variable">CHECK_INTERVAL</span> = <span class="py-src-number">60</span>
+
+<span class="py-src-variable">POSICOES_FILE</span> = <span class="py-src-string">&quot;posicoes.json&quot;</span>
+<span class="py-src-variable">ALERTADOS_FILE</span> = <span class="py-src-string">&quot;alertados.json&quot;</span>
+<span class="py-src-variable">HISTORICO_FILE</span> = <span class="py-src-string">&quot;historico.json&quot;</span>
+<span class="py-src-comment"># ===========================================</span>
+
+<span class="py-src-variable">logging</span>.<span class="py-src-variable">basicConfig</span>(
+    <span class="py-src-variable">level</span>=<span class="py-src-variable">logging</span>.<span class="py-src-variable">INFO</span>,
+    <span class="py-src-variable">format</span>=<span class="py-src-string">&quot;%(asctime)s - %(levelname)s - %(message)s&quot;</span>
+)
+
+<span class="py-src-variable">load_dotenv</span>()
+
+<span class="py-src-variable">BINANCE_API_KEY</span> = <span class="py-src-variable">os</span>.<span class="py-src-variable">getenv</span>(<span class="py-src-string">&quot;BINANCE_API_KEY&quot;</span>)
+<span class="py-src-variable">BINANCE_SECRET_KEY</span> = <span class="py-src-variable">os</span>.<span class="py-src-variable">getenv</span>(<span class="py-src-string">&quot;BINANCE_SECRET_KEY&quot;</span>)
+<span class="py-src-variable">TELEGRAM_BOT_TOKEN</span> = <span class="py-src-variable">os</span>.<span class="py-src-variable">getenv</span>(<span class="py-src-string">&quot;TELEGRAM_BOT_TOKEN&quot;</span>)
+<span class="py-src-variable">TELEGRAM_CHAT_ID</span> = <span class="py-src-variable">os</span>.<span class="py-src-variable">getenv</span>(<span class="py-src-string">&quot;TELEGRAM_CHAT_ID&quot;</span>)
+
+<span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">all</span>([<span class="py-src-variable">BINANCE_API_KEY</span>, <span class="py-src-variable">BINANCE_SECRET_KEY</span>, <span class="py-src-variable">TELEGRAM_BOT_TOKEN</span>, <span class="py-src-variable">TELEGRAM_CHAT_ID</span>]):
+    <span class="py-src-variable">raise</span> <span class="py-src-variable">RuntimeError</span>(<span class="py-src-string">&quot;Variáveis obrigatórias não encontradas no .env&quot;</span>)
+
+
+<span class="py-src-comment"># ================== UTILS ==================</span>
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">enviar_telegram</span>(<span class="py-src-parameter">mensagem</span>):
+    <span class="py-src-variable">url</span> = <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">https://api.telegram.org/bot</span>{<span class="py-src-variable">TELEGRAM_BOT_TOKEN</span>}<span class="py-src-fstring_middle">/sendMessage</span><span class="py-src-fstring_end">&quot;</span>
+    <span class="py-src-variable">payload</span> = {
+        <span class="py-src-string">&quot;chat_id&quot;</span>: <span class="py-src-variable">TELEGRAM_CHAT_ID</span>,
+        <span class="py-src-string">&quot;text&quot;</span>: <span class="py-src-variable">mensagem</span>,
+        <span class="py-src-string">&quot;parse_mode&quot;</span>: <span class="py-src-string">&quot;HTML&quot;</span>
+    }
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">requests</span>.<span class="py-src-variable">post</span>(<span class="py-src-variable">url</span>, <span class="py-src-variable">data</span>=<span class="py-src-variable">payload</span>, <span class="py-src-variable">timeout</span>=<span class="py-src-number">10</span>)
+    <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+        <span class="py-src-variable">logging</span>.<span class="py-src-variable">error</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro ao enviar Telegram: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">carregar_json</span>(<span class="py-src-parameter">path</span>):
+    <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">os</span>.<span class="py-src-variable">path</span>.<span class="py-src-variable">exists</span>(<span class="py-src-variable">path</span>):
+        <span class="py-src-variable">return</span> {}
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">with</span> <span class="py-src-variable">open</span>(<span class="py-src-variable">path</span>, <span class="py-src-string">&quot;r&quot;</span>) <span class="py-src-variable">as</span> <span class="py-src-variable">f</span>:
+            <span class="py-src-variable">conteudo</span> = <span class="py-src-variable">f</span>.<span class="py-src-variable">read</span>().<span class="py-src-variable">strip</span>()
+            <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">conteudo</span>:
+                <span class="py-src-variable">return</span> {}
+            <span class="py-src-variable">return</span> <span class="py-src-variable">json</span>.<span class="py-src-variable">loads</span>(<span class="py-src-variable">conteudo</span>)
+    <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+        <span class="py-src-variable">logging</span>.<span class="py-src-variable">warning</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro ao carregar </span>{<span class="py-src-variable">path</span>}<span class="py-src-fstring_middle">: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+        <span class="py-src-variable">return</span> {}
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">salvar_json</span>(<span class="py-src-parameter">path</span>, <span class="py-src-parameter">data</span>):
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">with</span> <span class="py-src-variable">open</span>(<span class="py-src-variable">path</span>, <span class="py-src-string">&quot;w&quot;</span>) <span class="py-src-variable">as</span> <span class="py-src-variable">f</span>:
+            <span class="py-src-variable">json</span>.<span class="py-src-variable">dump</span>(<span class="py-src-variable">data</span>, <span class="py-src-variable">f</span>, <span class="py-src-variable">indent</span>=<span class="py-src-number">2</span>)
+    <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+        <span class="py-src-variable">logging</span>.<span class="py-src-variable">error</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro ao salvar </span>{<span class="py-src-variable">path</span>}<span class="py-src-fstring_middle">: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">carregar_historico</span>():
+    <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">os</span>.<span class="py-src-variable">path</span>.<span class="py-src-variable">exists</span>(<span class="py-src-variable">HISTORICO_FILE</span>):
+        <span class="py-src-variable">return</span> []
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">with</span> <span class="py-src-variable">open</span>(<span class="py-src-variable">HISTORICO_FILE</span>, <span class="py-src-string">&quot;r&quot;</span>) <span class="py-src-variable">as</span> <span class="py-src-variable">f</span>:
+            <span class="py-src-variable">conteudo</span> = <span class="py-src-variable">f</span>.<span class="py-src-variable">read</span>().<span class="py-src-variable">strip</span>()
+            <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">conteudo</span>:
+                <span class="py-src-variable">return</span> []
+            <span class="py-src-variable">return</span> <span class="py-src-variable">json</span>.<span class="py-src-variable">loads</span>(<span class="py-src-variable">conteudo</span>)
+    <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+        <span class="py-src-variable">logging</span>.<span class="py-src-variable">warning</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro ao carregar histórico: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+        <span class="py-src-variable">return</span> []
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">salvar_historico</span>(<span class="py-src-parameter">historico</span>):
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">with</span> <span class="py-src-variable">open</span>(<span class="py-src-variable">HISTORICO_FILE</span>, <span class="py-src-string">&quot;w&quot;</span>) <span class="py-src-variable">as</span> <span class="py-src-variable">f</span>:
+            <span class="py-src-variable">json</span>.<span class="py-src-variable">dump</span>(<span class="py-src-variable">historico</span>, <span class="py-src-variable">f</span>, <span class="py-src-variable">indent</span>=<span class="py-src-number">2</span>)
+    <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+        <span class="py-src-variable">logging</span>.<span class="py-src-variable">error</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro ao salvar histórico: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">registrar_trade_no_historico</span>(<span class="py-src-parameter">par</span>, <span class="py-src-parameter">info</span>, <span class="py-src-parameter">preco_saida</span>, <span class="py-src-parameter">motivo</span>=<span class="py-src-string">&quot;take_profit&quot;</span>):
+    <span class="py-src-variable">historico</span> = <span class="py-src-variable">carregar_historico</span>()
+
+    <span class="py-src-comment"># Calcula lucro percentual</span>
+    <span class="py-src-variable">lucro_pct</span> = ((<span class="py-src-variable">preco_saida</span> - <span class="py-src-variable">info</span>[<span class="py-src-string">&quot;preco_entrada&quot;</span>]) / <span class="py-src-variable">info</span>[<span class="py-src-string">&quot;preco_entrada&quot;</span>]) * <span class="py-src-number">100</span>
+    <span class="py-src-comment"># Quantidade pode vir da posição; fallback para 1 se não tiver</span>
+    <span class="py-src-variable">quantidade</span> = <span class="py-src-variable">info</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;quantidade&quot;</span>, <span class="py-src-number">1</span>)
+    <span class="py-src-variable">lucro_usdt</span> = (<span class="py-src-variable">lucro_pct</span> / <span class="py-src-number">100</span>) * (<span class="py-src-variable">info</span>[<span class="py-src-string">&quot;preco_entrada&quot;</span>] * <span class="py-src-variable">quantidade</span>)
+
+    <span class="py-src-variable">trade</span> = {
+        <span class="py-src-string">&quot;id&quot;</span>: <span class="py-src-fstring_start">f&quot;</span>{<span class="py-src-variable">par</span>.<span class="py-src-variable">replace</span>(<span class="py-src-string">&#x27;/&#x27;</span>, <span class="py-src-string">&#x27;-&#x27;</span>)}<span class="py-src-fstring_middle">-</span>{<span class="py-src-variable">int</span>(<span class="py-src-variable">info</span>[<span class="py-src-string">&#x27;adicionado_em&#x27;</span>])}<span class="py-src-fstring_end">&quot;</span>,
+        <span class="py-src-string">&quot;par&quot;</span>: <span class="py-src-variable">par</span>,
+        <span class="py-src-string">&quot;lado&quot;</span>: <span class="py-src-variable">info</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;lado&quot;</span>, <span class="py-src-string">&quot;long&quot;</span>),
+        <span class="py-src-string">&quot;entrada_preco&quot;</span>: <span class="py-src-variable">info</span>[<span class="py-src-string">&quot;preco_entrada&quot;</span>],
+        <span class="py-src-string">&quot;saida_preco&quot;</span>: <span class="py-src-variable">preco_saida</span>,
+        <span class="py-src-string">&quot;quantidade&quot;</span>: <span class="py-src-variable">quantidade</span>,
+        <span class="py-src-string">&quot;entrada_ts&quot;</span>: <span class="py-src-variable">int</span>(<span class="py-src-variable">info</span>[<span class="py-src-string">&quot;adicionado_em&quot;</span>]),
+        <span class="py-src-string">&quot;saida_ts&quot;</span>: <span class="py-src-variable">int</span>(<span class="py-src-variable">time</span>.<span class="py-src-variable">time</span>()),
+        <span class="py-src-string">&quot;duracao_seg&quot;</span>: <span class="py-src-variable">int</span>(<span class="py-src-variable">time</span>.<span class="py-src-variable">time</span>() - <span class="py-src-variable">info</span>[<span class="py-src-string">&quot;adicionado_em&quot;</span>]),
+        <span class="py-src-string">&quot;lucro_usdt&quot;</span>: <span class="py-src-variable">round</span>(<span class="py-src-variable">lucro_usdt</span>, <span class="py-src-number">4</span>),
+        <span class="py-src-string">&quot;lucro_pct&quot;</span>: <span class="py-src-variable">round</span>(<span class="py-src-variable">lucro_pct</span>, <span class="py-src-number">2</span>),
+        <span class="py-src-string">&quot;alvo_atingido&quot;</span>: <span class="py-src-variable">motivo</span> == <span class="py-src-string">&quot;take_profit&quot;</span>,
+        <span class="py-src-string">&quot;motivo_saida&quot;</span>: <span class="py-src-variable">motivo</span>
+    }
+
+    <span class="py-src-variable">historico</span>.<span class="py-src-variable">append</span>(<span class="py-src-variable">trade</span>)
+    <span class="py-src-variable">salvar_historico</span>(<span class="py-src-variable">historico</span>)
+    <span class="py-src-variable">logging</span>.<span class="py-src-variable">info</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Trade registrado: </span>{<span class="py-src-variable">par</span>}<span class="py-src-fstring_middle"> | +</span>{<span class="py-src-variable">lucro_pct</span>:<span class="py-src-fstring_middle">.2f</span>}<span class="py-src-fstring_middle">%</span><span class="py-src-fstring_end">&quot;</span>)
+
+    <span class="py-src-comment"># Opcional: avisar no Telegram</span>
+    <span class="py-src-variable">msg</span> = (
+        <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">✅ &lt;b&gt;Trade Fechado&lt;/b&gt;\n</span><span class="py-src-fstring_end">&quot;</span>
+        <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Par: </span>{<span class="py-src-variable">par</span>}<span class="py-src-fstring_middle">\n</span><span class="py-src-fstring_end">&quot;</span>
+        <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Lucro: </span>{<span class="py-src-string">&#x27;+&#x27;</span> <span class="py-src-variable">if</span> <span class="py-src-variable">lucro_pct</span> &gt; <span class="py-src-number">0</span> <span class="py-src-variable">else</span> <span class="py-src-string">&#x27;&#x27;</span>}{<span class="py-src-variable">lucro_pct</span>:<span class="py-src-fstring_middle">.2f</span>}<span class="py-src-fstring_middle">% ($</span>{<span class="py-src-variable">lucro_usdt</span>:<span class="py-src-fstring_middle">.2f</span>}<span class="py-src-fstring_middle">)\n</span><span class="py-src-fstring_end">&quot;</span>
+        <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Motivo: </span>{<span class="py-src-variable">motivo</span>}<span class="py-src-fstring_end">&quot;</span>
+    )
+    <span class="py-src-variable">enviar_telegram</span>(<span class="py-src-variable">msg</span>)
+
+
+<span class="py-src-comment"># ================== EXCHANGE ==================</span>
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">criar_exchange</span>():
+    <span class="py-src-variable">exchange</span> = <span class="py-src-variable">ccxt</span>.<span class="py-src-variable">binance</span>({
+        <span class="py-src-string">&quot;apiKey&quot;</span>: <span class="py-src-variable">BINANCE_API_KEY</span>,
+        <span class="py-src-string">&quot;secret&quot;</span>: <span class="py-src-variable">BINANCE_SECRET_KEY</span>,
+        <span class="py-src-string">&quot;options&quot;</span>: {<span class="py-src-string">&quot;defaultType&quot;</span>: <span class="py-src-string">&quot;future&quot;</span>},
+        <span class="py-src-string">&quot;enableRateLimit&quot;</span>: <span class="py-src-variable">True</span>,
+    })
+    <span class="py-src-variable">exchange</span>.<span class="py-src-variable">load_markets</span>()
+    <span class="py-src-variable">return</span> <span class="py-src-variable">exchange</span>
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">obter_pares_futures_usdt</span>(<span class="py-src-parameter">exchange</span>):
+    <span class="py-src-variable">return</span> [
+        <span class="py-src-variable">symbol</span> <span class="py-src-variable">for</span> <span class="py-src-variable">symbol</span>, <span class="py-src-variable">market</span> <span class="py-src-variable">in</span> <span class="py-src-variable">exchange</span>.<span class="py-src-variable">markets</span>.<span class="py-src-variable">items</span>()
+        <span class="py-src-variable">if</span> <span class="py-src-variable">market</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;quote&quot;</span>) == <span class="py-src-string">&quot;USDT&quot;</span>
+        <span class="py-src-variable">and</span> <span class="py-src-variable">market</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;type&quot;</span>) == <span class="py-src-string">&quot;future&quot;</span>
+        <span class="py-src-variable">and</span> <span class="py-src-variable">market</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;linear&quot;</span>) <span class="py-src-variable">is</span> <span class="py-src-variable">True</span>
+        <span class="py-src-variable">and</span> <span class="py-src-variable">market</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;active&quot;</span>) <span class="py-src-variable">is</span> <span class="py-src-variable">True</span>
+    ]
+
+
+<span class="py-src-comment"># ================== DADOS DE MERCADO ==================</span>
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">get_candle_count</span>(<span class="py-src-parameter">exchange</span>, <span class="py-src-parameter">par</span>, <span class="py-src-parameter">timeframe</span>, <span class="py-src-parameter">limit</span>):
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">candles</span> = <span class="py-src-variable">exchange</span>.<span class="py-src-variable">fetch_ohlcv</span>(<span class="py-src-variable">par</span>, <span class="py-src-variable">timeframe</span>, <span class="py-src-variable">limit</span>=<span class="py-src-variable">limit</span>)
+        <span class="py-src-variable">return</span> <span class="py-src-variable">len</span>(<span class="py-src-variable">candles</span>)
+    <span class="py-src-variable">except</span>:
+        <span class="py-src-variable">return</span> <span class="py-src-number">0</span>
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">get_ticker</span>(<span class="py-src-parameter">exchange</span>, <span class="py-src-parameter">par</span>):
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">return</span> <span class="py-src-variable">exchange</span>.<span class="py-src-variable">fetch_ticker</span>(<span class="py-src-variable">par</span>)
+    <span class="py-src-variable">except</span>:
+        <span class="py-src-variable">return</span> <span class="py-src-variable">None</span>
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">get_momentum_1h</span>(<span class="py-src-parameter">exchange</span>, <span class="py-src-parameter">par</span>):
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">candles</span> = <span class="py-src-variable">exchange</span>.<span class="py-src-variable">fetch_ohlcv</span>(<span class="py-src-variable">par</span>, <span class="py-src-variable">TIMEFRAME_MOMENTUM</span>, <span class="py-src-variable">limit</span>=<span class="py-src-number">2</span>)
+        <span class="py-src-variable">if</span> <span class="py-src-variable">len</span>(<span class="py-src-variable">candles</span>) &lt; <span class="py-src-number">2</span>:
+            <span class="py-src-variable">return</span> <span class="py-src-number">0.0</span>
+        <span class="py-src-variable">prev</span> = <span class="py-src-variable">candles</span>[-<span class="py-src-number">2</span>][<span class="py-src-number">4</span>]
+        <span class="py-src-variable">curr</span> = <span class="py-src-variable">candles</span>[-<span class="py-src-number">1</span>][<span class="py-src-number">4</span>]
+        <span class="py-src-variable">return</span> ((<span class="py-src-variable">curr</span> - <span class="py-src-variable">prev</span>) / <span class="py-src-variable">prev</span>) * <span class="py-src-number">100</span>
+    <span class="py-src-variable">except</span>:
+        <span class="py-src-variable">return</span> <span class="py-src-number">0.0</span>
+
+
+<span class="py-src-comment"># ================== POSIÇÕES REAIS DA BINANCE ==================</span>
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">obter_posicoes_abertas_binance</span>(<span class="py-src-parameter">exchange</span>):
+    <span class="py-src-variable">try</span>:
+        <span class="py-src-variable">positions</span> = <span class="py-src-variable">exchange</span>.<span class="py-src-variable">fetch_positions</span>()
+        <span class="py-src-variable">abertas</span> = {}
+        <span class="py-src-variable">for</span> <span class="py-src-variable">pos</span> <span class="py-src-variable">in</span> <span class="py-src-variable">positions</span>:
+            <span class="py-src-variable">contracts</span> = <span class="py-src-variable">float</span>(<span class="py-src-variable">pos</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;contracts&quot;</span>, <span class="py-src-number">0</span>))
+            <span class="py-src-variable">if</span> <span class="py-src-variable">contracts</span> != <span class="py-src-number">0</span>:
+                <span class="py-src-variable">symbol</span> = <span class="py-src-variable">pos</span>[<span class="py-src-string">&quot;symbol&quot;</span>]
+                <span class="py-src-variable">entry_price</span> = <span class="py-src-variable">float</span>(<span class="py-src-variable">pos</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;entryPrice&quot;</span>, <span class="py-src-number">0</span>))
+                <span class="py-src-variable">side</span> = <span class="py-src-variable">pos</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;side&quot;</span>, <span class="py-src-string">&quot;long&quot;</span>)
+                <span class="py-src-variable">abertas</span>[<span class="py-src-variable">symbol</span>] = {
+                    <span class="py-src-string">&quot;preco_entrada&quot;</span>: <span class="py-src-variable">entry_price</span>,
+                    <span class="py-src-string">&quot;lado&quot;</span>: <span class="py-src-variable">side</span>,
+                    <span class="py-src-string">&quot;quantidade&quot;</span>: <span class="py-src-variable">contracts</span>,
+                    <span class="py-src-string">&quot;ativo&quot;</span>: <span class="py-src-variable">True</span>
+                }
+        <span class="py-src-variable">return</span> <span class="py-src-variable">abertas</span>
+    <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+        <span class="py-src-variable">logging</span>.<span class="py-src-variable">error</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro ao buscar posições abertas: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+        <span class="py-src-variable">return</span> {}
+
+
+<span class="py-src-comment"># ================== LÓGICA PRINCIPAL ==================</span>
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">eh_token_novo</span>(<span class="py-src-parameter">exchange</span>, <span class="py-src-parameter">par</span>):
+    <span class="py-src-variable">count</span> = <span class="py-src-variable">get_candle_count</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">par</span>, <span class="py-src-variable">TIMEFRAME_NOVO</span>, <span class="py-src-variable">MAX_CANDLES_NOVO</span> + <span class="py-src-number">5</span>)
+    <span class="py-src-variable">return</span> <span class="py-src-number">0</span> &lt; <span class="py-src-variable">count</span> &lt;= <span class="py-src-variable">MAX_CANDLES_NOVO</span>
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">detectar_pumps</span>(<span class="py-src-parameter">exchange</span>, <span class="py-src-parameter">pares</span>, <span class="py-src-parameter">alertados</span>):
+    <span class="py-src-variable">encontrados</span> = []
+
+    <span class="py-src-variable">for</span> <span class="py-src-variable">par</span> <span class="py-src-variable">in</span> <span class="py-src-variable">pares</span>:
+        <span class="py-src-variable">if</span> <span class="py-src-variable">par</span> <span class="py-src-variable">in</span> <span class="py-src-variable">alertados</span>:
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">eh_token_novo</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">par</span>):
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">ticker</span> = <span class="py-src-variable">get_ticker</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">par</span>)
+        <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">ticker</span>:
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">preco</span> = <span class="py-src-variable">float</span>(<span class="py-src-variable">ticker</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;last&quot;</span>) <span class="py-src-variable">or</span> <span class="py-src-number">0</span>)
+        <span class="py-src-variable">volume</span> = <span class="py-src-variable">float</span>(<span class="py-src-variable">ticker</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;quoteVolume&quot;</span>) <span class="py-src-variable">or</span> <span class="py-src-number">0</span>)
+
+        <span class="py-src-variable">if</span> <span class="py-src-variable">preco</span> &lt; <span class="py-src-variable">MIN_PRECO_PUMP</span>:
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">if</span> <span class="py-src-variable">volume</span> &lt; <span class="py-src-variable">MIN_VOLUME_USDT</span>:
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">momentum</span> = <span class="py-src-variable">get_momentum_1h</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">par</span>)
+        <span class="py-src-variable">if</span> <span class="py-src-variable">momentum</span> &lt; <span class="py-src-variable">MIN_MOMENTUM_1H_PCT</span>:
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">base</span> = <span class="py-src-variable">par</span>.<span class="py-src-variable">replace</span>(<span class="py-src-string">&quot;/&quot;</span>, <span class="py-src-string">&quot;&quot;</span>)
+        <span class="py-src-variable">link</span> = <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">https://www.tradingview.com/chart/?symbol=BINANCE:</span>{<span class="py-src-variable">base</span>}<span class="py-src-fstring_middle">.P</span><span class="py-src-fstring_end">&quot;</span>
+
+        <span class="py-src-variable">encontrados</span>.<span class="py-src-variable">append</span>({
+            <span class="py-src-string">&quot;par&quot;</span>: <span class="py-src-variable">par</span>,
+            <span class="py-src-string">&quot;preco&quot;</span>: <span class="py-src-variable">preco</span>,
+            <span class="py-src-string">&quot;volume&quot;</span>: <span class="py-src-variable">volume</span>,
+            <span class="py-src-string">&quot;momentum&quot;</span>: <span class="py-src-variable">momentum</span>,
+            <span class="py-src-string">&quot;link&quot;</span>: <span class="py-src-variable">link</span>
+        })
+
+    <span class="py-src-variable">return</span> <span class="py-src-variable">encontrados</span>
+
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">monitorar_posicoes</span>(<span class="py-src-parameter">exchange</span>):
+    <span class="py-src-variable">posicoes_local</span> = <span class="py-src-variable">carregar_json</span>(<span class="py-src-variable">POSICOES_FILE</span>)
+    <span class="py-src-variable">alterado</span> = <span class="py-src-variable">False</span>
+
+    <span class="py-src-variable">posicoes_binance</span> = <span class="py-src-variable">obter_posicoes_abertas_binance</span>(<span class="py-src-variable">exchange</span>)
+
+    <span class="py-src-comment"># Detectar novas posições</span>
+    <span class="py-src-variable">for</span> <span class="py-src-variable">par</span>, <span class="py-src-variable">info_binance</span> <span class="py-src-variable">in</span> <span class="py-src-variable">posicoes_binance</span>.<span class="py-src-variable">items</span>():
+        <span class="py-src-variable">if</span> <span class="py-src-variable">par</span> <span class="py-src-variable">not</span> <span class="py-src-variable">in</span> <span class="py-src-variable">posicoes_local</span>:
+            <span class="py-src-variable">preco_entrada</span> = <span class="py-src-variable">info_binance</span>[<span class="py-src-string">&quot;preco_entrada&quot;</span>]
+            <span class="py-src-variable">alvo_preco</span> = <span class="py-src-variable">preco_entrada</span> * (<span class="py-src-number">1</span> + <span class="py-src-variable">ALVO_LUCRO_PCT</span> / <span class="py-src-number">100</span>)
+
+            <span class="py-src-variable">posicoes_local</span>[<span class="py-src-variable">par</span>] = {
+                <span class="py-src-string">&quot;preco_entrada&quot;</span>: <span class="py-src-variable">preco_entrada</span>,
+                <span class="py-src-string">&quot;alvo_preco&quot;</span>: <span class="py-src-variable">alvo_preco</span>,
+                <span class="py-src-string">&quot;lado&quot;</span>: <span class="py-src-variable">info_binance</span>[<span class="py-src-string">&quot;lado&quot;</span>],
+                <span class="py-src-string">&quot;quantidade&quot;</span>: <span class="py-src-variable">info_binance</span>[<span class="py-src-string">&quot;quantidade&quot;</span>],
+                <span class="py-src-string">&quot;ativo&quot;</span>: <span class="py-src-variable">True</span>,
+                <span class="py-src-string">&quot;adicionado_em&quot;</span>: <span class="py-src-variable">time</span>.<span class="py-src-variable">time</span>()
+            }
+            <span class="py-src-variable">alterado</span> = <span class="py-src-variable">True</span>
+            <span class="py-src-variable">logging</span>.<span class="py-src-variable">info</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Nova posição detectada: </span>{<span class="py-src-variable">par</span>}<span class="py-src-fstring_middle"> @ $</span>{<span class="py-src-variable">preco_entrada</span>:<span class="py-src-fstring_middle">.4f</span>}<span class="py-src-fstring_end">&quot;</span>)
+
+    <span class="py-src-comment"># Monitorar fechamentos e alvos</span>
+    <span class="py-src-variable">for</span> <span class="py-src-variable">par</span>, <span class="py-src-variable">info</span> <span class="py-src-variable">in</span> <span class="py-src-variable">list</span>(<span class="py-src-variable">posicoes_local</span>.<span class="py-src-variable">items</span>()):
+        <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">info</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;ativo&quot;</span>, <span class="py-src-variable">False</span>):
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">if</span> <span class="py-src-variable">par</span> <span class="py-src-variable">not</span> <span class="py-src-variable">in</span> <span class="py-src-variable">posicoes_binance</span>:
+            <span class="py-src-comment"># Fechada manualmente ou por stop loss</span>
+            <span class="py-src-variable">ticker</span> = <span class="py-src-variable">get_ticker</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">par</span>)
+            <span class="py-src-variable">if</span> <span class="py-src-variable">ticker</span>:
+                <span class="py-src-variable">preco_saida</span> = <span class="py-src-variable">float</span>(<span class="py-src-variable">ticker</span>[<span class="py-src-string">&quot;last&quot;</span>])
+                <span class="py-src-variable">registrar_trade_no_historico</span>(<span class="py-src-variable">par</span>, <span class="py-src-variable">info</span>, <span class="py-src-variable">preco_saida</span>, <span class="py-src-variable">motivo</span>=<span class="py-src-string">&quot;manual_or_sl&quot;</span>)
+            <span class="py-src-variable">posicoes_local</span>[<span class="py-src-variable">par</span>][<span class="py-src-string">&quot;ativo&quot;</span>] = <span class="py-src-variable">False</span>
+            <span class="py-src-variable">alterado</span> = <span class="py-src-variable">True</span>
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-comment"># Verificar alvo</span>
+        <span class="py-src-variable">ticker</span> = <span class="py-src-variable">get_ticker</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">par</span>)
+        <span class="py-src-variable">if</span> <span class="py-src-variable">not</span> <span class="py-src-variable">ticker</span>:
+            <span class="py-src-variable">continue</span>
+
+        <span class="py-src-variable">preco_atual</span> = <span class="py-src-variable">float</span>(<span class="py-src-variable">ticker</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;last&quot;</span>) <span class="py-src-variable">or</span> <span class="py-src-number">0</span>)
+        <span class="py-src-variable">alvo</span> = <span class="py-src-variable">info</span>.<span class="py-src-variable">get</span>(<span class="py-src-string">&quot;alvo_preco&quot;</span>, <span class="py-src-number">0</span>)
+
+        <span class="py-src-variable">if</span> <span class="py-src-variable">preco_atual</span> &gt;= <span class="py-src-variable">alvo</span> <span class="py-src-variable">and</span> <span class="py-src-variable">alvo</span> &gt; <span class="py-src-number">0</span>:
+            <span class="py-src-variable">registrar_trade_no_historico</span>(<span class="py-src-variable">par</span>, <span class="py-src-variable">info</span>, <span class="py-src-variable">preco_atual</span>, <span class="py-src-variable">motivo</span>=<span class="py-src-string">&quot;take_profit&quot;</span>)
+            <span class="py-src-variable">posicoes_local</span>[<span class="py-src-variable">par</span>][<span class="py-src-string">&quot;ativo&quot;</span>] = <span class="py-src-variable">False</span>
+            <span class="py-src-variable">alterado</span> = <span class="py-src-variable">True</span>
+
+    <span class="py-src-variable">if</span> <span class="py-src-variable">alterado</span>:
+        <span class="py-src-variable">salvar_json</span>(<span class="py-src-variable">POSICOES_FILE</span>, <span class="py-src-variable">posicoes_local</span>)
+
+
+<span class="py-src-comment"># ================== LOOP ==================</span>
+
+<span class="py-src-variable">def</span> <span class="py-src-identifier">main</span>():
+    <span class="py-src-variable">exchange</span> = <span class="py-src-variable">criar_exchange</span>()
+    <span class="py-src-variable">pares</span> = <span class="py-src-variable">obter_pares_futures_usdt</span>(<span class="py-src-variable">exchange</span>)
+
+    <span class="py-src-variable">logging</span>.<span class="py-src-variable">info</span>(<span class="py-src-string">&quot;Sistema iniciado – scanner + monitor de posições + registro de trades&quot;</span>)
+
+    <span class="py-src-variable">while</span> <span class="py-src-variable">True</span>:
+        <span class="py-src-variable">try</span>:
+            <span class="py-src-variable">alertados</span> = <span class="py-src-variable">carregar_json</span>(<span class="py-src-variable">ALERTADOS_FILE</span>)
+            <span class="py-src-variable">monitorar_posicoes</span>(<span class="py-src-variable">exchange</span>)
+            <span class="py-src-variable">pumps</span> = <span class="py-src-variable">detectar_pumps</span>(<span class="py-src-variable">exchange</span>, <span class="py-src-variable">pares</span>, <span class="py-src-variable">alertados</span>)
+
+            <span class="py-src-variable">for</span> <span class="py-src-variable">p</span> <span class="py-src-variable">in</span> <span class="py-src-variable">pumps</span>:
+                <span class="py-src-variable">msg</span> = (
+                    <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">🔥 &lt;b&gt;PUMP EM TOKEN NOVO&lt;/b&gt;\n</span><span class="py-src-fstring_end">&quot;</span>
+                    <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Par: &lt;b&gt;</span>{<span class="py-src-variable">p</span>[<span class="py-src-string">&#x27;par&#x27;</span>]}<span class="py-src-fstring_middle">&lt;/b&gt;\n</span><span class="py-src-fstring_end">&quot;</span>
+                    <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Preço: $</span>{<span class="py-src-variable">p</span>[<span class="py-src-string">&#x27;preco&#x27;</span>]:<span class="py-src-fstring_middle">.4f</span>}<span class="py-src-fstring_middle">\n</span><span class="py-src-fstring_end">&quot;</span>
+                    <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Volume: $</span>{<span class="py-src-variable">p</span>[<span class="py-src-string">&#x27;volume&#x27;</span>]:<span class="py-src-fstring_middle">,.0f</span>}<span class="py-src-fstring_middle">\n</span><span class="py-src-fstring_end">&quot;</span>
+                    <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Momentum 1h: +</span>{<span class="py-src-variable">p</span>[<span class="py-src-string">&#x27;momentum&#x27;</span>]:<span class="py-src-fstring_middle">.1f</span>}<span class="py-src-fstring_middle">%\n</span><span class="py-src-fstring_end">&quot;</span>
+                    <span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Gráfico: </span>{<span class="py-src-variable">p</span>[<span class="py-src-string">&#x27;link&#x27;</span>]}<span class="py-src-fstring_end">&quot;</span>
+                )
+                <span class="py-src-variable">enviar_telegram</span>(<span class="py-src-variable">msg</span>)
+                <span class="py-src-variable">logging</span>.<span class="py-src-variable">info</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Alerta enviado para </span>{<span class="py-src-variable">p</span>[<span class="py-src-string">&#x27;par&#x27;</span>]}<span class="py-src-fstring_end">&quot;</span>)
+
+                <span class="py-src-variable">alertados</span>[<span class="py-src-variable">p</span>[<span class="py-src-string">&quot;par&quot;</span>]] = {<span class="py-src-string">&quot;detectado_em&quot;</span>: <span class="py-src-variable">time</span>.<span class="py-src-variable">time</span>()}
+
+            <span class="py-src-variable">if</span> <span class="py-src-variable">pumps</span>:
+                <span class="py-src-variable">salvar_json</span>(<span class="py-src-variable">ALERTADOS_FILE</span>, <span class="py-src-variable">alertados</span>)
+
+            <span class="py-src-variable">time</span>.<span class="py-src-variable">sleep</span>(<span class="py-src-variable">CHECK_INTERVAL</span>)
+
+        <span class="py-src-variable">except</span> <span class="py-src-variable">KeyboardInterrupt</span>:
+            <span class="py-src-variable">logging</span>.<span class="py-src-variable">info</span>(<span class="py-src-string">&quot;Encerrado pelo usuário&quot;</span>)
+            <span class="py-src-variable">break</span>
+        <span class="py-src-variable">except</span> <span class="py-src-variable">Exception</span> <span class="py-src-variable">as</span> <span class="py-src-variable">e</span>:
+            <span class="py-src-variable">logging</span>.<span class="py-src-variable">error</span>(<span class="py-src-fstring_start">f&quot;</span><span class="py-src-fstring_middle">Erro no loop: </span>{<span class="py-src-variable">e</span>}<span class="py-src-fstring_end">&quot;</span>)
+            <span class="py-src-variable">time</span>.<span class="py-src-variable">sleep</span>(<span class="py-src-number">30</span>)
+
+
+<span class="py-src-variable">if</span> <span class="py-src-variable">__name__</span> == <span class="py-src-string">&quot;__main__&quot;</span>:
+    <span class="py-src-variable">main</span>()
+</pre>
+</body>

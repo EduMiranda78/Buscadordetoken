@@ -1,0 +1,17 @@
+[
+  {
+    "id": "ZAMA-USDT:USDT-1767961698",
+    "par": "ZAMA/USDT:USDT",
+    "lado": "long",
+    "entrada_preco": 0.142,
+    "saida_preco": 0.1188,
+    "quantidade": 1,
+    "entrada_ts": 1767961698,
+    "saida_ts": 1768039636,
+    "duracao_seg": 77937,
+    "lucro_usdt": -0.0232,
+    "lucro_pct": -16.34,
+    "alvo_atingido": false,
+    "motivo_saida": "manual_or_sl"
+  }
+]
